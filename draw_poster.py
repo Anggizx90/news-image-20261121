@@ -1,32 +1,42 @@
 #!/usr/bin/env python3
-"""Draw the front page of THE WORLD TODAY for Saturday 21 November 2026.
+"""Draw THE WORLD TODAY, a one-page newspaper front page summing up the
+world news of Saturday 21 November 2026.
 
-A code-drawn newspaper page (1024x1024 PNG) summing up the day's world
-news. Every story below was reported on 21 November 2026 (events of
-20-21 November, first reported on the 21st in the outlets named in
-README.md). No network, no clock, no randomness: the output is
-byte-identical on every run.
+Build-time script (run locally by the author). It renders a dense 1024x1024
+PNG with Pillow and writes it to entry.png next to this file, or to the path
+given as the first argument. The entrypoint main.py only copies that PNG,
+so nothing here runs inside the grader.
 
-Run:  python3 draw_poster.py        (writes entry.png next to this file)
+Deterministic: no clock, no randomness, no network. Same input bytes in,
+same PNG bytes out.
 """
 
+import hashlib
+import math
 import os
+import sys
+
 from PIL import Image, ImageDraw, ImageFont
 
-W, H = 1024, 1024
-PAPER = (253, 252, 247)
-INK = (18, 18, 18)
-RULE = (18, 18, 18)
-RED = (178, 34, 34)
-BLUE = (24, 64, 120)
-GREY = (92, 92, 92)
-LIGHT_GREY = (210, 208, 200)
+W = 1024
+H = 1024
+MARGIN = 28
+
+PAPER = (246, 241, 227)      # warm newsprint
+INK = (17, 17, 17)           # near-black
+RED = (168, 30, 38)          # headline red
+GREY = (84, 80, 70)          # secondary text
+RULE = (201, 194, 174)       # hairline rules
+BOX = (255, 253, 244)        # story-box fill
+BOX_EDGE = (196, 189, 166)   # story-box border
+BLACK_BAND = (14, 14, 14)
 
 FONT_DIR = "/usr/share/fonts/truetype/dejavu"
-SERIF = os.path.join(FONT_DIR, "DejaVuSerif.ttf")
-SERIF_B = os.path.join(FONT_DIR, "DejaVuSerif-Bold.ttf")
+SERIF_BOLD = os.path.join(FONT_DIR, "DejaVuSerif-Bold.ttf")
 SANS = os.path.join(FONT_DIR, "DejaVuSans.ttf")
-SANS_B = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
+SANS_BOLD = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
+
+PROBLEMS = []
 
 
 def font(path, size):
@@ -35,219 +45,265 @@ def font(path, size):
 
 def wrap(draw, text, fnt, max_w):
     """Greedy word wrap; returns a list of lines that fit max_w."""
-    lines = []
-    for para in text.split("\n"):
-        words = para.split()
-        if not words:
-            lines.append("")
-            continue
-        cur = words[0]
-        for word in words[1:]:
-            trial = cur + " " + word
-            if draw.textlength(trial, font=fnt) <= max_w:
-                cur = trial
-            else:
+    lines, cur = [], ""
+    for word in text.split():
+        trial = (cur + " " + word).strip()
+        if draw.textlength(trial, font=fnt) <= max_w:
+            cur = trial
+        else:
+            if cur:
                 lines.append(cur)
-                cur = word
+            cur = word
+    if cur:
         lines.append(cur)
     return lines
 
 
-def text_block(draw, x, y, text, fnt, max_w, leading, fill=INK, max_lines=None):
-    """Draw wrapped text; returns the y just below the last line."""
+def fitted(draw, text, path, size, max_w, max_lines, shrink_to=9):
+    """Pick the largest font size (down to shrink_to) whose wrap fits."""
+    size_now = size
+    while size_now > shrink_to:
+        fnt = font(path, size_now)
+        if len(wrap(draw, text, fnt, max_w)) <= max_lines:
+            return fnt, wrap(draw, text, fnt, max_w)
+        size_now -= 1
+    fnt = font(path, shrink_to)
     lines = wrap(draw, text, fnt, max_w)
-    if max_lines is not None:
+    if len(lines) > max_lines:
+        PROBLEMS.append("overflow: %r needs %d lines at min size" % (text, len(lines)))
         lines = lines[:max_lines]
+    return fnt, lines
+
+
+def text_block(draw, x, y, w, lines, fnt, fill=INK, leading=None):
+    """Draw lines left-aligned; return the y just below the block."""
+    lh = leading if leading is not None else int(fnt.size * 1.18)
     for line in lines:
         draw.text((x, y), line, font=fnt, fill=fill)
-        y += leading
+        y += lh
     return y
 
 
-def hline(draw, x0, x1, y, width=1, fill=RULE):
+def rule(draw, x0, y, x1, width=2, fill=INK):
     draw.line([(x0, y), (x1, y)], fill=fill, width=width)
 
 
-def draw_chart(draw, x, y, w, h):
-    """A small falling-line chart for the lead market story."""
-    draw.rectangle([x, y, x + w, y + h], outline=RULE, width=2)
-    for i in range(1, 4):
-        gy = y + h * i // 4
-        draw.line([(x + 4, gy), (x + w - 4, gy)], fill=LIGHT_GREY, width=1)
-    # descending line: index levels across the week, Friday's plunge last
-    pts = [(0.04, 0.18), (0.22, 0.24), (0.38, 0.30), (0.55, 0.38),
-           (0.70, 0.44), (0.84, 0.60), (0.96, 0.86)]
-    xy = [(x + w * fx, y + h * fy) for fx, fy in pts]
-    draw.line(xy, fill=RED, width=4, joint="curve")
-    for px, py in xy:
-        draw.ellipse([px - 4, py - 4, px + 4, py + 4], fill=RED)
-    draw.text((x + 8, y + 6), "S&P 500  -3.7%  FRIDAY",
-              font=font(SANS_B, 15), fill=RED)
+def starburst(draw, cx, cy, r_out, r_in, points=8, fill=RED):
+    pts = []
+    for i in range(points * 2):
+        r = r_out if i % 2 == 0 else r_in
+        ang = math.pi * i / points - math.pi / 2
+        pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
+    draw.polygon(pts, fill=fill)
 
 
-# ---------------------------------------------------------------- stories
-LEAD_KICKER = "MARKETS  \u00b7  NEW YORK"
-LEAD_HEAD = "AI ROUT DRAGS WALL STREET INTO CORRECTION"
-LEAD_BODY = (
-    "US stocks plunged on Friday as the AI sell-off spread: the S&P 500 "
-    "fell 3.7% and the Dow entered a correction, and the Nasdaq dropped "
-    "5.3%, wiping out all its 2026 gains. Tokyo's Nikkei fell 5.1%; "
-    "gold slid 4.6%."
-)
-
-STORIES = [
-    ("UKRAINE", RED,
-     "Russia's biggest strikes of the year",
-     "400+ drones and 110 missiles hit Ukraine overnight; eight killed "
-     "in Kyiv; bridges and rail stations burn."),
-    ("POLAND", RED,
-     "Russian missiles land in Poland",
-     "Two missiles and a suspected drone come down; Tusk calls it a "
-     "deliberate provocation."),
-    ("THE HAGUE", RED,
-     "Court: Myanmar guilty of genocide",
-     "The International Court of Justice finds Myanmar responsible for "
-     "genocide against the Rohingya."),
-    ("BRITAIN  \u00b7  EUROPEAN UNION", BLUE,
-     "UK and EU sign biggest post-Brexit deals",
-     "Three pacts on food trade, carbon and youth mobility; 100,000 "
-     "young Britons gain EU access."),
-    ("SAUDI ARABIA", RED,
-     "Houthis fire on Riyadh again",
-     "The coalition intercepts three missiles aimed at the capital, the "
-     "third night in a row."),
-    ("DENMARK", RED,
-     "Denmark foils 'hit' on Ukrainian rapper",
-     "Police arrest two men and expel a Russian diplomat over a plot to "
-     "kill rapper Kyivstoner."),
-    ("CLIMATE", BLUE,
-     "COP31 runs past its deadline",
-     "Talks in Antalya stall over fossil fuels as nearly 200 nations "
-     "fail to agree; the summit is extended."),
-    ("BRAZIL", BLUE,
-     "Bolsonaro back in hospital",
-     "The jailed ex-president, 71, is treated for a near-complete "
-     "intestinal obstruction."),
-    ("UNITED STATES", RED,
-     "FBI crime database hacked",
-     "Hackers breach the National Crime Information Center; the second "
-     "FBI intrusion in recent months."),
-    ("TECHNOLOGY", BLUE,
-     "Trump warns tech firms over data centres",
-     "The president threatens \u201ctremendous penalties\u201d for US firms "
-     "building data centres abroad."),
-    ("TECHNOLOGY", BLUE,
-     "Nvidia slides as SEC opens probe",
-     "The regulator examines Nvidia's accounting after Jensen Huang "
-     "resigns; Trump urges his return."),
-    ("ESTONIA", RED,
-     "Estonia to shut border with Russia",
-     "Crossings close from 1 December after a GRU-linked arson bid on "
-     "drone maker Threod Systems."),
-]
-
-ALSO = [
-    "Cancer pill clears tumours in 1 in 12",
-    "GTA VI sets $3.8bn first-day record",
-    "6.9 quake shakes Peru's Andes",
-    "Gen Z protests in 25 countries",
-    "Palisades fire arsonist convicted",
-    "Three Salvadoran soldiers die in Haiti",
-]
-
-
-def draw_page():
-    img = Image.new("RGB", (W, H), PAPER)
-    d = ImageDraw.Draw(img)
-    mx = 28                      # side margin
-    right = W - mx
-
-    # ---------------------------------------------------------- masthead
-    # y 0..140
-    title_f = font(SERIF_B, 66)
+def draw_masthead(draw):
+    band_top, band_h = 22, 78
+    draw.rectangle([0, band_top, W, band_top + band_h], fill=BLACK_BAND)
     title = "THE WORLD TODAY"
-    tw = d.textlength(title, font=title_f)
-    d.text(((W - tw) / 2, 4), title, font=title_f, fill=INK)
-    hline(d, mx, right, 82, width=3)
-    date_f = font(SANS_B, 22)
-    date = "SATURDAY, 21 NOVEMBER 2026"
-    dw = d.textlength(date, font=date_f)
-    d.text(((W - dw) / 2, 90), date, font=date_f, fill=RED)
-    sub_f = font(SANS, 15)
-    sub = "One day's world news  \u2014  every story below happened or was first reported today"
-    sw = d.textlength(sub, font=sub_f)
-    d.text(((W - sw) / 2, 118), sub, font=sub_f, fill=GREY)
-    hline(d, mx, right, 140, width=2)
+    fnt = font(SERIF_BOLD, 56)
+    tw = draw.textlength(title, font=fnt)
+    draw.text(((W - tw) / 2, band_top + 10), title, font=fnt, fill=(250, 247, 238))
+    # date strip under the band
+    y = band_top + band_h + 12
+    date_fnt = font(SANS_BOLD, 21)
+    draw.text((MARGIN, y), "SATURDAY, 21 NOVEMBER 2026", font=date_fnt, fill=RED)
+    side = "THE DAY'S NEWS IN ONE PAGE"
+    side_fnt = font(SANS_BOLD, 13)
+    sw = draw.textlength(side, font=side_fnt)
+    draw.text((W - MARGIN - sw, y + 5), side, font=side_fnt, fill=GREY)
+    rule(draw, MARGIN, y + 32, W - MARGIN, width=3)
+    return y + 40
 
-    # ---------------------------------------------------------- lead story
-    # y 150..386
-    y = 150
-    kick_f = font(SANS_B, 15)
-    d.text((mx, y), LEAD_KICKER, font=kick_f, fill=RED)
-    y += 22
-    head_f = font(SERIF_B, 34)
-    y = text_block(d, mx, y, LEAD_HEAD, head_f, 640, 40)
-    y += 4
-    body_f = font(SANS, 18)
-    y = text_block(d, mx, y, LEAD_BODY, body_f, 640, 23)
-    # chart on the right of the lead
-    draw_chart(d, 700, 150, 268, 152)
-    tick_f = font(SANS_B, 14)
-    tick = ("S&P 500 \u22123.7%   \u00b7   Dow in correction\n"
-            "Nasdaq \u22125.3%   \u00b7   Nikkei \u22125.1%\n"
-            "Anthropic \u221210%   \u00b7   Gold \u22124.6%")
-    ty = 310
-    for line in tick.split("\n"):
-        d.text((700, ty), line, font=tick_f, fill=INK)
-        ty += 19
-    hline(d, mx, right, 372, width=2)
 
-    # ---------------------------------------------------------- story grid
-    # y 384..933 : 3 cols x 4 rows
+def draw_lead(draw, y):
+    """Lead story: the AI market rout, with a falling chart on the right."""
+    x0, x1 = MARGIN, W - MARGIN
+    chart_w = 300
+    text_w = (x1 - x0) - chart_w - 24
+    head = "AI ROUT SENDS MARKETS INTO FREE FALL"
+    fnt, lines = fitted(draw, head, SERIF_BOLD, 40, text_w, 2)
+    yy = text_block(draw, x0, y, text_w, lines, fnt, fill=INK, leading=46)
+    deck = ("Wall Street's AI sell-off deepens into a rout: the S&P 500 and "
+            "the Dow enter correction as Nvidia tumbles 14% \u2014 and Asia "
+            "follows, with Tokyo down 5.1%.")
+    deck_fnt = font(SANS, 15)
+    deck_lines = wrap(draw, deck, deck_fnt, text_w)
+    if len(deck_lines) > 3:
+        PROBLEMS.append("lead deck overflow: %d lines" % len(deck_lines))
+        deck_lines = deck_lines[:3]
+    yy = text_block(draw, x0, yy + 4, text_w, deck_lines, deck_fnt,
+                    fill=GREY, leading=19)
+    # falling chart, right side
+    cx0 = x1 - chart_w
+    cy0, cy1 = y + 6, y + 118
+    draw.rectangle([cx0, cy0, x1, cy1], outline=RULE, width=1, fill=BOX)
+    pts = [(cx0 + 8, cy0 + 26), (cx0 + 60, cy0 + 40), (cx0 + 110, cy0 + 36),
+           (cx0 + 160, cy0 + 58), (cx0 + 205, cy0 + 70), (cx0 + 250, cy0 + 86),
+           (cx0 + 292, cy1 - 12)]
+    draw.line(pts, fill=RED, width=4, joint="curve")
+    for px, py in pts[1:-1]:
+        draw.ellipse([px - 3, py - 3, px + 3, py + 3], fill=RED)
+    draw.ellipse([pts[-1][0] - 5, pts[-1][1] - 5, pts[-1][0] + 5, pts[-1][1] + 5],
+                 fill=RED)
+    lab = font(SANS_BOLD, 12)
+    draw.text((cx0 + 10, cy1 - 22), "NASDAQ THIS WEEK", font=lab, fill=GREY)
+    draw.text((cx0 + 232, cy1 - 22), "\u22125.3%", font=font(SANS_BOLD, 15), fill=RED)
+    return max(yy, cy1) + 10
+
+
+def draw_ticker(draw, y):
+    """One-line market scoreboard."""
+    cells = [("S&P 500", "\u22123.7%"), ("NASDAQ", "\u22125.3%"),
+             ("NIKKEI", "\u22125.1%"), ("KOSPI", "\u22125.2%"),
+             ("GOLD", "\u22124.0%"), ("VIX", "37")]
+    x0, x1 = MARGIN, W - MARGIN
+    cw = (x1 - x0) / len(cells)
+    draw.rectangle([x0, y, x1, y + 44], fill=BLACK_BAND)
+    for i, (label, val) in enumerate(cells):
+        cx = x0 + i * cw
+        lf = font(SANS_BOLD, 10)
+        vf = font(SANS_BOLD, 19)
+        lw = draw.textlength(label, font=lf)
+        vw = draw.textlength(val, font=vf)
+        draw.text((cx + (cw - lw) / 2, y + 4), label, font=lf,
+                  fill=(190, 186, 172))
+        draw.text((cx + (cw - vw) / 2, y + 19), val, font=vf, fill=(255, 255, 255))
+        if i:
+            draw.line([(cx, y + 6), (cx, y + 38)], fill=(70, 70, 70), width=1)
+    return y + 44 + 12
+
+
+def feature_box(draw, x, y, w, h, kicker, headline, deck, motif):
+    draw.rectangle([x, y, x + w, y + h], fill=BOX, outline=BOX_EDGE, width=1)
+    pad = 12
+    ix = x + pad
+    iy = y + 10
+    kf = font(SANS_BOLD, 11)
+    draw.text((ix, iy), kicker, font=kf, fill=RED)
+    iy += 18
+    rule(draw, ix, iy, x + w - pad, width=1, fill=RULE)
+    iy += 8
+    if motif == "strikes":
+        # three short red ticks, tucked into the kicker row (right side)
+        bx, by = x + w - 66, y + 12
+        for j, off in enumerate((0, 7, 14)):
+            draw.line([(bx + off, by + 10), (bx + off + 12, by + 2)], fill=RED, width=3)
+    elif motif == "riyadh":
+        # one small burst, tucked into the kicker row (right side)
+        starburst(draw, x + w - 24, y + 18, 10, 4)
+    hf, hlines = fitted(draw, headline, SANS_BOLD, 23, w - 2 * pad, 2)
+    iy = text_block(draw, ix, iy, w - 2 * pad, hlines, hf, fill=INK, leading=27)
+    df = font(SANS, 13)
+    dlines = wrap(draw, deck, df, w - 2 * pad)
+    if len(dlines) > 3:
+        PROBLEMS.append("feature deck overflow: %r" % deck[:40])
+        dlines = dlines[:3]
+    text_block(draw, ix, iy + 4, w - 2 * pad, dlines, df, fill=GREY, leading=17)
+
+
+def draw_features(draw, y):
+    gap = 16
+    w = (W - 2 * MARGIN - gap) // 2
+    h = 156
+    feature_box(draw, MARGIN, y, w, h, "WAR IN EUROPE",
+                "Russia's biggest strikes hit Kyiv \u2014 and Poland",
+                "More than 400 drones and 110 missiles rain down overnight; "
+                "eight killed in Kyiv and three bridges hit. A Russian "
+                "missile lands in Poland \u2014 Warsaw calls it a deliberate "
+                "provocation.", "strikes")
+    feature_box(draw, MARGIN + w + gap, y, w, h, "MIDDLE EAST",
+                "Third night of fire over Riyadh",
+                "Saudi defences intercept three Houthi missiles aimed at the "
+                "capital early on Saturday, days after a strike damaged the "
+                "PIF Tower, Riyadh's tallest.", "riyadh")
+    return y + h + 12
+
+
+GRID = [
+    ("UK\u2013EU RESET", "Britain and EU seal biggest post-Brexit deal",
+     "100,000 youth-mobility places a year, plus food and carbon pacts, agreed in Brussels."),
+    ("GEN Z", "Young Europe takes to the streets",
+     "Tens of thousands march in 25 countries: \u201cMoney for schools, not war.\u201d"),
+    ("CLIMATE", "COP31 runs past its deadline",
+     "Talks in Antalya deadlocked as a draft deal drops any fossil-fuel phase-out."),
+    ("DENMARK", "Denmark says Russia plotted to kill a rapper",
+     "Kyivstoner was the target, police say; Moscow\u2019s defence attach\u00e9 expelled."),
+    ("ESTONIA", "Estonia to shut its Russia border",
+     "Road crossings close from 1 December for at least six months over sabotage fears."),
+    ("CYBER", "FBI crime database hacked",
+     "Breach of the national NCIC system is probed \u2014 the second FBI intrusion in months."),
+    ("NVIDIA", "Nvidia slides as SEC opens probe",
+     "Shares fall 14% as regulators examine the chip giant\u2019s accounting."),
+    ("TRUMP", "Trump threatens tax on data centres abroad",
+     "\u201cTremendous tax\u201d for US firms that build AI centres overseas, he says."),
+    ("GTA VI", "GTA VI banks $3.79bn in a day",
+     "Rockstar\u2019s launch is the biggest in entertainment history: 32.5m copies."),
+    ("PERU", "6.9 quake shakes Peru",
+     "Tremor felt in Lima; no damage or casualties reported."),
+    ("HEALTH", "Cancer pill hailed a breakthrough",
+     "Daraxonrasib halted tumour growth in 90% of 61 pancreatic cancer patients."),
+    ("JUSTICE", "Guilty: man who started Palisades fire",
+     "Jury convicts Rinderknecht over the blaze that killed 12 in Los Angeles."),
+]
+
+
+def draw_grid(draw, y):
     cols, rows = 3, 4
-    gx0, gy0 = mx, 384
-    gw = (right - mx - (cols - 1) * 18) // cols
-    gh = 130
-    gx_step = gw + 18
-    gy_step = gh + 8
-    kick2_f = font(SANS_B, 14)
-    shead_f = font(SERIF_B, 21)
-    sbody_f = font(SANS, 17)
-    for i, (kicker, colour, head, body) in enumerate(STORIES):
-        cx = gx0 + (i % cols) * gx_step
-        cy = gy0 + (i // cols) * gy_step
-        d.text((cx, cy), kicker, font=kick2_f, fill=colour)
-        cy += 20
-        cy = text_block(d, cx, cy, head, shead_f, gw, 25, max_lines=2)
-        cy += 2
-        text_block(d, cx, cy, body, sbody_f, gw, 21, max_lines=3)
-
-    # ---------------------------------------------------------- also strip
-    # y 940..1014
-    strip_y = 940
-    hline(d, mx, right, strip_y, width=2)
-    also_f = font(SANS_B, 15)
-    also_b = font(SANS, 15)
-    label = "ALSO TODAY  \u00b7  "
-    d.text((mx, strip_y + 9), label, font=also_f, fill=RED)
-    lx = mx + d.textlength(label, font=also_f)
-    items = "   \u00b7   ".join(ALSO)
-    text_block(d, lx, strip_y + 9, items, also_b, right - lx, 20,
-               max_lines=2)
-    hline(d, mx, right, 1012, width=2)
-    foot_f = font(SANS, 12)
-    foot = "Sources: Reuters, CNN, BBC, AFP, AP, FT, Guardian, Al Jazeera  \u00b7  All stories reported 21 November 2026"
-    fw = d.textlength(foot, font=foot_f)
-    d.text(((W - fw) / 2, 994), foot, font=foot_f, fill=GREY)
-    return img
+    gap = 10
+    bw = (W - 2 * MARGIN - gap * (cols - 1)) // cols
+    bh = 109
+    for idx, (kicker, headline, deck) in enumerate(GRID):
+        r, c = divmod(idx, cols)
+        x = MARGIN + c * (bw + gap)
+        yy = y + r * (bh + gap)
+        draw.rectangle([x, yy, x + bw, yy + bh], fill=BOX, outline=BOX_EDGE, width=1)
+        pad = 10
+        ix = x + pad
+        iy = yy + 8
+        kf = font(SANS_BOLD, 10)
+        draw.text((ix, iy), kicker, font=kf, fill=RED)
+        iy += 16
+        hf, hlines = fitted(draw, headline, SANS_BOLD, 16, bw - 2 * pad, 2)
+        iy = text_block(draw, ix, iy, bw - 2 * pad, hlines, hf, fill=INK, leading=19)
+        df = font(SANS, 11)
+        dlines = wrap(draw, deck, df, bw - 2 * pad)
+        if len(dlines) > 2:
+            PROBLEMS.append("grid deck overflow: %r" % deck[:40])
+            dlines = dlines[:2]
+        text_block(draw, ix, iy + 2, bw - 2 * pad, dlines, df, fill=GREY, leading=14)
+    return y + rows * bh + (rows - 1) * gap
 
 
-def main():
-    img = draw_page()
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "entry.png")
-    img.save(out, format="PNG")
-    print("wrote", out, img.size)
+def draw_footer(draw, y):
+    rule(draw, MARGIN, y, W - MARGIN, width=2)
+    note = ("All stories as reported on Saturday 21 November 2026  \u00b7  "
+            "Reuters \u00b7 AP \u00b7 CNN \u00b7 WSJ \u00b7 The Guardian")
+    fnt = font(SANS, 11)
+    tw = draw.textlength(note, font=fnt)
+    draw.text(((W - tw) / 2, y + 8), note, font=fnt, fill=GREY)
+
+
+def build(out_path):
+    img = Image.new("RGB", (W, H), PAPER)
+    draw = ImageDraw.Draw(img)
+    y = draw_masthead(draw)
+    y = draw_lead(draw, y)
+    y = draw_ticker(draw, y)
+    y = draw_features(draw, y)
+    y = draw_grid(draw, y)
+    draw_footer(draw, y + 8)
+    if PROBLEMS:
+        for p in PROBLEMS:
+            print("LAYOUT PROBLEM:", p, file=sys.stderr)
+        raise SystemExit("layout overflow: %d problem(s)" % len(PROBLEMS))
+    img.save(out_path, format="PNG")
+    data = open(out_path, "rb").read()
+    print("wrote %s  %d bytes  md5 %s" % (out_path, len(data),
+          hashlib.md5(data).hexdigest()))
 
 
 if __name__ == "__main__":
-    main()
+    here = os.path.dirname(os.path.abspath(__file__))
+    target = sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, "entry.png")
+    build(target)
